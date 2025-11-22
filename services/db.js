@@ -1,3 +1,4 @@
+// db.js
 import mongoose from "mongoose";
 
 export async function initDB() {
@@ -5,39 +6,32 @@ export async function initDB() {
     await mongoose.connect(process.env.MONGO_URI, {
       serverSelectionTimeoutMS: 15000
     });
-
     console.log("MongoDB (Mongoose) connected");
   } catch (err) {
     console.error("MongoDB connection error:", err.message);
+    process.exit(1);
   }
 }
 
-// Correct Account Schema matching your stored data
+// Account Schema
 const accountSchema = new mongoose.Schema({
-  accountId: {
-    type: String,
-    required: true,
-    unique: true
-  },
-  name: {
-    type: String,
-    required: true
-  },
-  balance: {
-    type: Number,
-    required: true,
-    default: 0
-  },
-  status: {
-    type: String,
-    enum: ["active", "inactive", "closed"],
-    default: "active"
-  }
+  accountId: { type: String, required: true, unique: true },
+  name: { type: String, required: true },
+  balance: { type: Number, required: true, default: 0 },
+  status: { type: String, enum: ["active", "inactive", "closed"], default: "active" }
 });
 
 export const Account = mongoose.model("Account", accountSchema);
 
-// Log schema
+// FAQ Schema
+const faqSchema = new mongoose.Schema({
+  question: { type: String, required: true, index: true },
+  answer: { type: String, required: true }
+});
+
+export const FAQ = mongoose.model("FAQ", faqSchema);
+
+// Interaction log
 const interactionSchema = new mongoose.Schema({
   inputText: String,
   intent: String,

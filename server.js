@@ -1,82 +1,132 @@
-import "dotenv/config";
-
+// server.js
 import express from "express";
-import multer from "multer";
 import cors from "cors";
-import fs from "fs/promises";
+import bodyParser from "body-parser";
+import "dotenv/config";
+import multer from "multer";
+import fs from "fs";
 import path from "path";
 
-import { initDB, Account, InteractionLog } from "./services/db.js";
-import { transcribeFile } from "./services/stt_deepgram.js";
+import { initDB, InteractionLog } from "./services/db.js";
 import { detectIntent } from "./services/nlu_gemini.js";
 import { generateResponse } from "./services/respond_gemini.js";
+import { transcribeFile } from "./services/stt_deepgram.js";
 import { speakTextToFile } from "./services/tts_gtts.js";
 
-// Initialize DB FIRST
-await initDB();
-
 const app = express();
+
+// Enable CORS for frontend
+app.use(cors());
+
+// Support JSON
+app.use(bodyParser.json());
+
+// Create uploads directory
 const upload = multer({ dest: "uploads/" });
 
-app.use(cors());
-app.use(express.json());
+// Initialize Database
+await initDB();
 
-app.get("/", (req, res) => res.send("Voice Bot Backend Running"));
+// Root test route
+app.get("/", (req, res) => {
+  res.send("VoiceBot backend is running 🚀");
+});
 
-app.post("/api/voice-bot", upload.single("audio"), async (req, res) => {
+
+// ==========================================================
+// 1️⃣ TEXT-BASED BOT ENDPOINT
+// ==========================================================
+app.post("/api/message", async (req, res) => {
   try {
-    if (!req.file)
-      return res.status(400).json({ error: "No audio file provided" });
+    const { text } = req.body;
 
-    const audioPath = req.file.path;
+    if (!text) return res.status(400).json({ error: "text field is required" });
 
-    // 1. STT
-    const text = await transcribeFile(audioPath);
-
-    // 2. NLU
+    // NLU
     const nlu = await detectIntent(text);
 
-    // 3. Intent Action (Database logic)
-    let responseText = await generateResponse(text, nlu.intent, nlu.entities);
+    // BOT REPLY
+    const reply = await generateResponse(text, nlu.intent, nlu.entities);
 
-    if (nlu.intent === "check_balance") {
-      const id = Number(nlu.entities?.accountId || nlu.entities?.id);
-
-      const acc = await Account.findOne({ accountId: id });
-
-      if (acc)
-        responseText = `The balance for account ${id} is ₹${acc.balance}.`;
-      else
-        responseText = `I could not find account ${id}. Please check the ID.`;
-    }
-
-    // 4. TTS
-    const outFile = await speakTextToFile(responseText);
-    const audioBuffer = await fs.readFile(outFile);
-
-    // Cleanup
-    await fs.unlink(audioPath);
-
-    // 5. DB Logging
-    await InteractionLog.create({
+    // Log interaction (non-blocking)
+    InteractionLog.create({
       inputText: text,
       intent: nlu.intent,
-      responseText,
-      audioOut: outFile
-    });
+      responseText: reply
+    }).catch(() => {});
 
-    res.json({
+    return res.json({
       inputText: text,
       intent: nlu.intent,
       entities: nlu.entities,
-      responseText,
-      audioBase64: audioBuffer.toString("base64")
+      responseText: reply
     });
+
   } catch (err) {
-    console.error("Error:", err);
-    res.status(500).json({ error: err.message });
+    console.error("Server error:", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
-const port = process.env.PORT || 8000;
-app.listen(port, () => console.log("Server running on port", port));
+
+// ==========================================================
+// 2️⃣ VOICE BOT ENDPOINT (AUDIO → TEXT → RESPONSE → TTS)
+// ==========================================================
+app.post("/api/voice-bot", upload.single("audio"), async (req, res) => {
+  try {
+    // 1. Ensure audio file exists
+    if (!req.file) {
+      return res.status(400).json({ error: "No audio file uploaded" });
+    }
+
+    const audioPath = req.file.path;
+
+    // 2. Speech-to-Text
+    const inputText = await transcribeFile(audioPath);
+
+    // 3. NLU
+    const nlu = await detectIntent(inputText);
+
+    // 4. Business logic response
+    const responseText = await generateResponse(inputText, nlu.intent, nlu.entities);
+
+    // 5. Convert response text to speech
+    const tts = await speakTextToFile(responseText);
+    const audioBase64 = fs.readFileSync(tts.path).toString("base64");
+
+    // 6. Cleanup uploaded audio
+    fs.unlinkSync(audioPath);
+
+    // 7. Log interaction
+    InteractionLog.create({
+      inputText,
+      intent: nlu.intent,
+      responseText
+    }).catch(() => {});
+
+    return res.json({
+      inputText,
+      intent: nlu.intent,
+      entities: nlu.entities,
+      responseText,
+      audioBase64
+    });
+
+  } catch (err) {
+    console.error("Voice Bot Error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
+// ==========================================================
+// STATIC SERVE FOR TTS OUTPUT (OPTIONAL)
+// ==========================================================
+app.use("/tts", express.static(path.join(process.cwd(), "tts_output")));
+
+
+// ==========================================================
+// START SERVER
+// ==========================================================
+const PORT = process.env.PORT || 8000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
