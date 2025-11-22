@@ -86,7 +86,11 @@ export async function generateResponse(userText, intent, entities) {
       return best.doc.answer;
     }
 
-    return "I don't have an exact answer for that. Would you like me to save this question for review?";
+    return {
+      text: "I don't have an exact answer for that. Would you like me to save this question for review?",
+      suggestSave: true
+    };
+
   }
 
   // Save question
