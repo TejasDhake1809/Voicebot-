@@ -1,0 +1,15 @@
+@import "tailwindcss";
+
+:root {
+--bg: #f0f2f5;
+--primary: #2563eb;
+--muted: #6b7280;
+}
+
+
+html, body, #root { height: 100%; }
+body { background: var(--bg); }
+
+
+/* small custom classes */
+.scrollbar-hide::-webkit-scrollbar { display: none; }

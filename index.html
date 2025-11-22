@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Voice Bot</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <style>
+    body {
+      margin: 0; padding: 0;
+      font-family: 'Arial', sans-serif;
+      background: #f0f2f5;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+
+    #chat-container {
+      width: 420px;
+      height: 85vh;
+      background: white;
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+      overflow: hidden;
+    }
+
+    #header {
+      padding: 15px;
+      background: #4a90e2;
+      color: white;
+      font-size: 20px;
+      font-weight: bold;
+      text-align: center;
+    }
+
+    #messages {
+      flex: 1;
+      padding: 15px;
+      overflow-y: auto;
+    }
+
+    .msg {
+      margin-bottom: 15px;
+      max-width: 80%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 14px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
+
+    .user {
+      background: #d1e7ff;
+      align-self: flex-end;
+      border-bottom-right-radius: 2px;
+    }
+
+    .bot {
+      background: #eeeeee;
+      align-self: flex-start;
+      border-bottom-left-radius: 2px;
+    }
+
+    .audio-msg {
+      margin-top: 8px;
+    }
+
+    #input-area {
+      padding: 10px;
+      display: flex;
+      border-top: 1px solid #ccc;
+      gap: 8px;
+      background: #fafafa;
+    }
+
+    #textInput {
+      flex: 1;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid #ccc;
+      outline: none;
+      font-size: 14px;
+    }
+
+    #sendBtn, #micBtn, #uploadBtn {
+      width: 45px;
+      height: 45px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      font-size: 18px;
+      color: white;
+    }
+
+    #sendBtn {
+      background: #4a90e2;
+    }
+
+    #micBtn {
+      background: #ff4a4a;
+    }
+
+    /* NEW Upload button */
+    #uploadBtn {
+      background: #8a4ae2;
+    }
+
+    #saveBtn {
+      display: none;
+      width: 100%;
+      padding: 10px;
+      border: none;
+      background: #4a90e2;
+      color: white;
+      font-size: 16px;
+      cursor: pointer;
+      border-radius: 0;
+    }
+  </style>
+</head>
+
+<body>
+
+<div id="chat-container">
+  <div id="header">Voice Bot Assistant</div>
+
+  <div id="messages"></div>
+
+  <button id="saveBtn" onclick="savePending()">Save This Question</button>
+
+  <div id="input-area">
+    <input id="textInput" placeholder="Type a message..." />
+    <button id="sendBtn" onclick="sendText()">➤</button>
+    <button id="micBtn" onclick="toggleRecording()">🎤</button>
+
+    <!-- NEW: Upload file button -->
+    <button id="uploadBtn" onclick="triggerUpload()">📁</button>
+    <input type="file" id="uploadInput" accept="audio/*" style="display:none" onchange="sendUploadedFile()" />
+  </div>
+</div>
+
+<script>
+  const sessionId = crypto.randomUUID();
+  let mediaRecorder;
+  let audioChunks = [];
+  let isRecording = false;
+
+  const API = "http://localhost:8000";
+
+  function appendMessage(text, type, audioBase64 = null) {
+    let msg = document.createElement("div");
+    msg.className = "msg " + type;
+    msg.textContent = text;
+
+    if (audioBase64) {
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.src = "data:audio/mp3;base64," + audioBase64;
+      audio.className = "audio-msg";
+      msg.appendChild(audio);
+    }
+
+    document.getElementById("messages").appendChild(msg);
+    document.getElementById("messages").scrollTop = 999999;
+  }
+
+  // TEXT SEND ==================================================
+  async function sendText() {
+    const text = document.getElementById("textInput").value.trim();
+    if (!text) return;
+
+    appendMessage(text, "user");
+    document.getElementById("textInput").value = "";
+    document.getElementById("saveBtn").style.display = "none";
+
+    const res = await fetch(`${API}/api/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, sessionId })
+    });
+    const data = await res.json();
+
+    handleBotMessage(data.responseText);
+  }
+
+  // HANDLE BOT MESSAGE ======================================
+  function handleBotMessage(text, audioBase64 = null) {
+    appendMessage(text, "bot", audioBase64);
+
+    if (text.toLowerCase().includes("save") && text.toLowerCase().includes("question")) {
+      document.getElementById("saveBtn").style.display = "block";
+    }
+  }
+
+  // SAVE PENDING QUESTION ===================================
+  async function savePending() {
+    const res = await fetch(`${API}/api/save-question`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "yes", sessionId })
+    });
+
+    const data = await res.json();
+    appendMessage(data.message, "bot");
+    document.getElementById("saveBtn").style.display = "none";
+  }
+
+  // 🎤 AUDIO RECORDING =======================================
+  async function toggleRecording() {
+    if (!isRecording) startRecording();
+    else stopRecording();
+  }
+
+  async function startRecording() {
+    isRecording = true;
+    document.getElementById("micBtn").style.background = "#d93636";
+
+    let stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+
+    audioChunks = [];
+    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+    mediaRecorder.onstop = sendAudioBlob;
+
+    mediaRecorder.start();
+  }
+
+  function stopRecording() {
+    isRecording = false;
+    document.getElementById("micBtn").style.background = "#ff4a4a";
+    mediaRecorder.stop();
+  }
+
+  // SEND AUDIO TO BACKEND ==================================
+  async function sendAudioBlob() {
+    const blob = new Blob(audioChunks, { type: "audio/webm" });
+    const file = new File([blob], "voice.webm");
+
+    appendMessage("(Voice message sent)", "user");
+
+    await uploadAudioFile(file);
+  }
+
+  // === UPLOAD FILE BUTTON ==================================
+  function triggerUpload() {
+    document.getElementById("uploadInput").click();
+  }
+
+  async function sendUploadedFile() {
+    const file = document.getElementById("uploadInput").files[0];
+    if (!file) return;
+    
+    appendMessage("(Audio file uploaded)", "user");
+
+    await uploadAudioFile(file);
+  }
+
+  async function uploadAudioFile(file) {
+    const form = new FormData();
+    form.append("audio", file);
+    form.append("sessionId", sessionId);
+
+    const res = await fetch(`${API}/api/voice-bot`, {
+      method: "POST",
+      body: form
+    });
+
+    const data = await res.json();
+
+    handleBotMessage(data.responseText, data.audioBase64);
+  }
+</script>
+
+</body>
+</html>
