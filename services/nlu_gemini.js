@@ -1,37 +1,50 @@
 // nlu_gemini.js
 import axios from "axios";
 
+/*
+  Highly improved NLU:
+  - Strong FAQs detection
+  - Local heuristics override Gemini mistakes
+*/
+
 export async function detectIntent(text) {
+  const cleanedText = normalizeForIntent(text);
+
   const prompt = `
 You are an intent classifier.
 
-User message: "${text}"
+User message: "${cleanedText}"
 
 Return ONLY pure JSON. No markdown, no backticks, no explanation.
 
-JSON schema:
+JSON format:
 {
-  "intent": "",                  // check_balance, deposit, withdraw, get_owner, account_details, faq, save_question, greeting, goodbye, smalltalk
+  "intent": "",                  
   "entities": {
-    "accountId": null,           // digits or null
-    "amount": null,              // numeric or null
-    "question": null             // for FAQ intents
+    "accountId": null,
+    "amount": null,
+    "question": null
   }
 }
 
-Rules:
-- If user asks about balance -> check_balance
-- If user asks to deposit/put/add money -> deposit (extract amount)
-- If user asks to withdraw/take -> withdraw (extract amount)
-- If user asks "who owns", "owner", "account holder" -> get_owner (extract accountId)
-- If user asks "show account details" or "details for account X" -> account_details (extract accountId)
-- If user asks a general question "how to ...", "what is ..." -> faq (entities.question = user's text)
-- If user asks to "save" or "store this question" -> save_question (entities.question)
-- Default -> smalltalk
+INTENT RULES:
+- Balance → check_balance
+- Deposit/add/put money → deposit
+- Withdraw/take/remove money → withdraw
+- "who owns", "owner", "holder" → get_owner
+- "details for account", "account details" → account_details
+- ANY user question like:
+      "how to ...", 
+      "how do I ...", 
+      "what to do", 
+      "can you tell me", 
+      "i want to know",
+      "steps to ..."
+  → faq   (entities.question = entire user text)
+- "save", "store this question" → save_question
+- Default → smalltalk
 
-Return values:
-- Intent must be a string.
-- Entities must match the schema. Use null for missing values.
+RULE: If unsure, choose faq instead of smalltalk.
 `;
 
   try {
@@ -44,31 +57,84 @@ Return values:
     );
 
     let raw = res.data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-
-    // Clean common Markdown/code fences
     raw = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
 
-    // Try parse -> fallback to extracting {...}
+    let parsed;
     try {
-      return sanitize(JSON.parse(raw));
-    } catch (e) {
+      parsed = sanitize(JSON.parse(raw));
+    } catch {
       const match = raw.match(/\{[\s\S]*\}/);
-      if (match) {
-        try {
-          return sanitize(JSON.parse(match[0]));
-        } catch (e2) {
-          console.error("NLU: JSON parse failed after extraction:", e2);
-        }
-      }
-      console.error("NLU RAW (unparseable):", raw);
-      return { intent: "smalltalk", entities: { accountId: null, amount: null, question: null } };
+      parsed = match ? sanitize(JSON.parse(match[0])) : { intent: "smalltalk", entities: {} };
     }
+
+    // ---------------------------------------------
+    // 🔥 SUPER-IMPORTANT: Override incorrect intent
+    // ---------------------------------------------
+    if (isFAQ(cleanedText)) {
+      parsed.intent = "faq";
+      parsed.entities.question = cleanedText;
+    }
+
+    // If Gemini "smalltalk" but looks like a question → faq
+    if (parsed.intent === "smalltalk" && looksLikeQuestion(cleanedText)) {
+      parsed.intent = "faq";
+      parsed.entities.question = cleanedText;
+    }
+
+    return parsed;
+
   } catch (err) {
-    console.error("Gemini RAW Error:", err.response?.data || err.message || err);
+    console.error("Gemini RAW Error:", err.response?.data || err);
+
+    // On any error → treat questions as FAQ
+    if (looksLikeQuestion(cleanedText) || isFAQ(cleanedText)) {
+      return {
+        intent: "faq",
+        entities: { accountId: null, amount: null, question: cleanedText }
+      };
+    }
+
     return { intent: "smalltalk", entities: { accountId: null, amount: null, question: null } };
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/*                                Helper Logic                                */
+/* -------------------------------------------------------------------------- */
+
+// Normalize STT noisy input
+function normalizeForIntent(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^\w\s?]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Looks like FAQ based on patterns
+function isFAQ(text) {
+  return (
+    text.startsWith("how to") ||
+    text.startsWith("how do i") ||
+    text.includes("how can i") ||
+    text.includes("i want to") ||
+    text.includes("what to do") ||
+    text.includes("steps to") ||
+    text.includes("can you tell me") ||
+    text.includes("please explain") ||
+    text.includes("help me") ||
+    text.endsWith("?")
+  );
+}
+
+// Generic question detection
+function looksLikeQuestion(text) {
+  const qWords = ["what", "how", "why", "when", "where", "who", "which"];
+  const first = text.split(" ")[0];
+  return text.endsWith("?") || qWords.includes(first);
+}
+
+// Clean the JSON
 function sanitize(obj) {
   const out = {
     intent: typeof obj?.intent === "string" ? obj.intent : "smalltalk",
@@ -76,17 +142,17 @@ function sanitize(obj) {
   };
 
   const e = obj?.entities || {};
-  if (e.accountId != null) {
+  if (e.accountId) {
     const digits = String(e.accountId).match(/\d+/g);
     if (digits) out.entities.accountId = digits.join("");
   }
 
-  if (e.amount != null) {
+  if (e.amount) {
     const num = Number(String(e.amount).replace(/[^0-9.-]+/g, ""));
     if (!Number.isNaN(num)) out.entities.amount = num;
   }
 
-  if (e.question != null) {
+  if (e.question) {
     out.entities.question = String(e.question).trim();
   }
 
