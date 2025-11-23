@@ -1,189 +1,206 @@
-// respond_gemini.js (Optimized for your FAQ dataset)
+// respond_gemini.js
 import { Account, FAQ } from "./db.js";
 
-// New weights tuned for your FAQ list
-const FUZZY_THRESHOLD = 0.45;
-const MAX_CANDIDATES = 300;
+// === FAQ fuzzy matching helpers ===================================
 
-export async function generateResponse(userText, intent, entities) {
+// Escape regex
+function escapeRegex(s) {
+  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Simple “does this look like a question?”
+function looksLikeQuestion(text) {
+  if (!text) return false;
+  const s = String(text).toLowerCase().trim();
+  return (
+    s.endsWith("?") ||
+    /\b(how|what|why|when|who|which|can|could|should)\b/.test(s)
+  );
+}
+
+// Fuzzy similarity (normalized Levenshtein)
+function similarity(a, b) {
+  if (!a || !b) return 0;
+  a = a.toLowerCase();
+  b = b.toLowerCase();
+  const m = [];
+  for (let i = 0; i <= b.length; i++) {
+    m[i] = [i];
+    for (let j = 1; j <= a.length; j++) {
+      m[i][j] =
+        i === 0
+          ? j
+          : Math.min(
+              m[i - 1][j] + 1,
+              m[i][j - 1] + 1,
+              m[i - 1][j - 1] + (b[i - 1] === a[j - 1] ? 0 : 1)
+            );
+    }
+  }
+  const dist = m[b.length][a.length];
+  const maxLen = Math.max(a.length, b.length);
+  return 1 - dist / maxLen;
+}
+
+const FUZZY_THRESHOLD = 0.45;
+
+
+// ===================================================================
+//                          MAIN FUNCTION
+// ===================================================================
+
+export async function generateResponse(
+  userText,
+  intent,
+  entities,
+  currentAccountId = null
+) {
+  // Basic responses
   const RULES = {
     greeting: "Hello! How can I assist you today?",
     goodbye: "Goodbye! Take care!",
     smalltalk: "I'm here to help you. Could you please clarify?"
   };
-
   if (RULES[intent]) return RULES[intent];
 
-  const accountId = String(entities.accountId || "").trim();
+  // ================================================================
+  //          ACCOUNT ID NORMALIZATION + SECURITY FIX
+  // ================================================================
+  let accountId = entities.accountId ? String(entities.accountId).trim() : null;
 
-  // Intents requiring account ID
+  // If user did not specify ANY account ID → use THEIR OWN account ID
+  if (!accountId && currentAccountId) {
+    accountId = currentAccountId;
+  }
+
+  // For intents that need an account
   if (["check_balance", "deposit", "withdraw", "get_owner", "account_details"].includes(intent)) {
-    if (!accountId) return "Please provide your account ID.";
-  }
 
-  // ACCOUNT LOGIC (unchanged)
-  if (intent === "account_details") {
-    const acc = await Account.findOne({ accountId });
-    if (!acc) return `Account ${accountId} not found.`;
-    return `Account ID: ${acc.accountId}\nName: ${acc.name}\nBalance: ₹${acc.balance}\nStatus: ${acc.status}`;
-  }
-
-  if (intent === "check_balance") {
-    const acc = await Account.findOne({ accountId });
-    if (!acc) return `I could not find account ${accountId}.`;
-    return `Your balance for account ${acc.accountId} is ₹${acc.balance}.`;
-  }
-
-  if (intent === "get_owner") {
-    const acc = await Account.findOne({ accountId });
-    if (!acc) return `I could not find account ${accountId}.`;
-    return `The owner of account ${acc.accountId} is ${acc.name}.`;
-  }
-
-  if (intent === "deposit") {
-    if (entities.amount == null) return "How much would you like to deposit?";
-    const acc = await Account.findOne({ accountId });
-    if (!acc) return `I could not find account ${accountId}.`;
-    acc.balance += Number(entities.amount);
-    await acc.save();
-    return `Successfully deposited ₹${entities.amount}. New balance is ₹${acc.balance}.`;
-  }
-
-  if (intent === "withdraw") {
-    if (entities.amount == null) return "How much would you like to withdraw?";
-    const acc = await Account.findOne({ accountId });
-    if (!acc) return `I could not find account ${accountId}.`;
-    if (acc.balance < Number(entities.amount)) return "Insufficient balance.";
-    acc.balance -= Number(entities.amount);
-    await acc.save();
-    return `Successfully withdrew ₹${entities.amount}. Remaining balance is ₹${acc.balance}.`;
-  }
-
-  // FAQ LOGIC (Improved)
-  if (intent === "faq" || looksLikeFAQ(userText)) {
-    const q = (entities.question || userText || "").trim();
-
-    // Step 1: quick regex match
-    try {
-      const regex = new RegExp(escapeRegex(q), "i");
-      const exact = await FAQ.findOne({ question: { $regex: regex } });
-      if (exact) return exact.answer;
-    } catch {}
-
-    // Step 2: load candidates
-    let candidates = await FAQ.find().limit(MAX_CANDIDATES).lean();
-
-    // Step 3: compute best fuzzy match
-    const scores = candidates.map((doc) => ({
-      doc,
-      score: faqSimilarity(q, doc.question)
-    }));
-
-    scores.sort((a, b) => b.score - a.score);
-
-    const best = scores[0];
-    if (best && best.score >= FUZZY_THRESHOLD) {
-      return best.doc.answer;
+    // If STILL no accountId
+    if (!accountId) {
+      return "Please provide your account ID.";
     }
 
+    // If user explicitly mentioned a different accountId → unauthorized
+    if (entities.accountId && accountId !== currentAccountId) {
+      return "You are not authorized to access another user's account.";
+    }
+  }
+
+  // ================================================================
+  //                     BUSINESS LOGIC
+  // ================================================================
+
+  // ACCOUNT DETAILS
+  if (intent === "account_details") {
+    const account = await Account.findOne({ accountId });
+    if (!account) return `Account ${accountId} not found.`;
+    return `Account ID: ${account.accountId}
+Name: ${account.name}
+Balance: ₹${account.balance}
+Status: ${account.status}`;
+  }
+
+  // CHECK BALANCE
+  if (intent === "check_balance") {
+    const account = await Account.findOne({ accountId });
+    if (!account) return `I could not find account ${accountId}.`;
+    return `Your balance for account ${account.accountId} is ₹${account.balance}.`;
+  }
+
+  // GET OWNER
+  if (intent === "get_owner") {
+    const account = await Account.findOne({ accountId });
+    if (!account) return `I could not find account ${accountId}.`;
+    return `The owner of account ${account.accountId} is ${account.name}.`;
+  }
+
+  // DEPOSIT
+  if (intent === "deposit") {
+    if (entities.amount == null) return "How much would you like to deposit?";
+    const account = await Account.findOne({ accountId });
+    if (!account) return `I could not find account ${accountId}.`;
+    account.balance += Number(entities.amount);
+    await account.save();
+    return `Successfully deposited ₹${entities.amount}. New balance is ₹${account.balance}.`;
+  }
+
+  // WITHDRAW
+  if (intent === "withdraw") {
+    if (entities.amount == null) return "How much would you like to withdraw?";
+    const account = await Account.findOne({ accountId });
+    if (!account) return `I could not find account ${accountId}.`;
+    if (account.balance < Number(entities.amount)) return "Insufficient balance.";
+    account.balance -= Number(entities.amount);
+    await account.save();
+    return `Successfully withdrew ₹${entities.amount}. Remaining balance is ₹${account.balance}.`;
+  }
+
+  // ================================================================
+  //                          FAQ SEARCH
+  // ================================================================
+  if (intent === "faq" || looksLikeQuestion(userText)) {
+    const q = (entities.question || userText || "").trim();
+    if (!q) return "Please tell me your question.";
+
+    // 1. Try exact or close regex match
+    const words = q.replace(/[?.,!]/g, "").split(" ");
+    const allFAQs = await FAQ.find({}).limit(300);
+
+    let best = null;
+    let bestScore = 0;
+
+    for (const f of allFAQs) {
+      const base = String(f.question || "").toLowerCase();
+      const lowerQ = q.toLowerCase();
+      const sim1 = similarity(lowerQ, base);
+
+      let sim2 = 0;
+      for (const w of words) {
+        if (!w.trim()) continue;
+        if (base.includes(w.toLowerCase())) sim2 += 0.1;
+      }
+
+      const score = sim1 + sim2;
+      if (score > bestScore) {
+        bestScore = score;
+        best = f;
+      }
+    }
+
+    if (best && bestScore >= FUZZY_THRESHOLD) {
+      return best.answer;
+    }
+
+    // No match → ask user if they want to save it
     return {
       text: "I don't have an exact answer for that. Would you like me to save this question for review?",
       suggestSave: true
     };
-
   }
 
-  // Save question
+  // ================================================================
+  //                   SAVE QUESTION
+  // ================================================================
   if (intent === "save_question") {
     const q = entities.question || userText;
     if (!q) return "Please tell me which question you'd like saved.";
+
     const existing = await FAQ.findOne({
       question: { $regex: new RegExp("^" + escapeRegex(q.trim()) + "$", "i") }
     });
-    if (existing) return "This question already exists in the FAQ list.";
-    await FAQ.create({ question: q, answer: "No answer yet. Admin will review." });
-    return "Your question has been saved for review.";
-  }
-
-  return "Let me help you with that.";
-}
-
-/*************** FAQ SIMILARITY FUNCTIONS *****************/
-
-function faqSimilarity(a, b) {
-  const na = normalize(a);
-  const nb = normalize(b);
-
-  const lev = levenshteinRatio(na, nb);
-  const jac = jaccard(na.split(" "), nb.split(" "));
-  const tok = tokenOverlap(na.split(" "), nb.split(" "));
-
-  return lev * 0.25 + jac * 0.55 + tok * 0.20;
-}
-
-// Remove filler words + normalize
-function normalize(s) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/[^\w\s]/g, " ")
-    .split(/\s+/)
-    .filter(w => !["my","your","the","a","an","to","for","me","please","can","could","would"].includes(w))
-    .join(" ")
-    .trim();
-}
-
-function jaccard(a, b) {
-  const A = new Set(a);
-  const B = new Set(b);
-  const inter = new Set([...A].filter(x => B.has(x)));
-  const union = new Set([...A, ...B]);
-  return union.size === 0 ? 0 : inter.size / union.size;
-}
-
-function tokenOverlap(a, b) {
-  const A = new Set(a);
-  const B = new Set(b);
-  if (A.size === 0) return 0;
-  const inter = new Set([...A].filter(x => B.has(x)));
-  return inter.size / Math.min(A.size, B.size);
-}
-
-function levenshteinRatio(a, b) {
-  const dist = levenshtein(a, b);
-  const maxLen = Math.max(a.length, b.length);
-  return maxLen === 0 ? 1 : 1 - dist / maxLen;
-}
-
-function levenshtein(a, b) {
-  const m = a.length, n = b.length;
-  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      dp[i][j] = Math.min(
-        dp[i - 1][j] + 1,
-        dp[i][j - 1] + 1,
-        dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
-      );
+    if (existing) {
+      return "This question already exists in our FAQ list.";
     }
+
+    await FAQ.create({
+      question: q,
+      answer: "No answer yet. Admin will review."
+    });
+
+    return "Your question has been saved for review. We'll add an answer soon.";
   }
-  return dp[m][n];
-}
 
-// Detect if question is FAQ-like
-function looksLikeFAQ(text) {
-  text = text.toLowerCase();
-  return (
-    text.includes("how to") ||
-    text.includes("how do") ||
-    text.includes("i want to") ||
-    text.includes("what to do") ||
-    text.includes("please explain") ||
-    text.includes("how can i")
-  );
-}
-
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Default
+  return "Let me help you with that.";
 }

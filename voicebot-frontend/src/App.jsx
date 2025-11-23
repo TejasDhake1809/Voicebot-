@@ -1,48 +1,95 @@
+// src/App.jsx
 import React, { useState, useRef } from "react";
 import ChatWindow from "./components/ChatWindow";
 import RecorderButton from "./components/RecorderButton";
 import SaveButton from "./components/SaveButton";
+import Login from "./components/Login";
+import Register from "./components/Register";
 import { postMessage, postVoice, savePending } from "./services/api";
 
-// Generate unique session per tab
 function generateSessionId() {
   if (crypto && crypto.randomUUID) return crypto.randomUUID();
   return "sess_" + Math.random().toString(36).slice(2);
 }
 
 export default function App() {
+  // ------------------ AUTH ------------------
+  const [isAuthed, setIsAuthed] = useState(!!localStorage.getItem("token"));
+  const [mode, setMode] = useState("login"); // login / register
+
+  // ------------------ CHAT STATES ------------------
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
   const [recording, setRecording] = useState(false);
   const [sessionId] = useState(generateSessionId());
   const [saveVisible, setSaveVisible] = useState(false);
+
   const mediaRecorderRef = useRef(null);
   const chunksRef = useRef([]);
 
-  // ======================
-  // Push message to chat
-  // ======================
+  // ------------------ AUTH SCREEN ------------------
+  if (!isAuthed) {
+    if (mode === "login") {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
+          <div className="w-full max-w-md">
+            <Login onLogin={() => setIsAuthed(true)} />
+
+            <p className="text-center mt-4 text-gray-700">
+              Don't have an account?
+              <button
+                className="text-blue-600 font-semibold ml-1"
+                onClick={() => setMode("register")}
+              >
+                Register here
+              </button>
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    if (mode === "register") {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
+          <div className="w-full max-w-md">
+            <Register
+              onRegistered={() => {
+                setIsAuthed(true);
+              }}
+            />
+
+            <p className="text-center mt-4 text-gray-700">
+              Already have an account?
+              <button
+                className="text-blue-600 font-semibold ml-1"
+                onClick={() => setMode("login")}
+              >
+                Login here
+              </button>
+            </p>
+          </div>
+        </div>
+      );
+    }
+  }
+
+  // ------------------ CHAT HELPERS ------------------
   function pushMessage(who, txt, audioBase64 = null) {
     setMessages((prev) => [...prev, { who, text: txt, audioBase64 }]);
   }
 
-  // ======================
-  // TEXT SEND
-  // ======================
   async function handleSendText() {
     if (!text.trim()) return;
 
-    pushMessage("user", text);
     const userText = text;
+    pushMessage("user", userText);
     setText("");
 
     const res = await postMessage(userText, sessionId);
     handleBotResponse(res);
   }
 
-  // ======================
-  // BOT RESPONSE HANDLER
-  // ======================
   function handleBotResponse(res) {
     const respText =
       res?.responseText || res?.response || "Something went wrong.";
@@ -50,18 +97,15 @@ export default function App() {
 
     pushMessage("bot", respText, audio);
 
-    // Detect if bot suggests saving the question
     if (/save.*question/i.test(respText)) {
       setSaveVisible(true);
     }
   }
 
-  // ======================
-  // RECORDING START
-  // ======================
   async function startRecording() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
       const mr = new MediaRecorder(stream);
       mediaRecorderRef.current = mr;
       chunksRef.current = [];
@@ -83,14 +127,11 @@ export default function App() {
       mr.start();
       setRecording(true);
     } catch (err) {
-      console.log("Error", err.message);
+      console.log(err);
       alert("Microphone access denied.");
     }
   }
 
-  // ======================
-  // RECORDING STOP
-  // ======================
   function stopRecording() {
     if (mediaRecorderRef.current) {
       mediaRecorderRef.current.stop();
@@ -99,41 +140,41 @@ export default function App() {
     setRecording(false);
   }
 
-  // ======================
-  // SAVE PENDING QUESTION
-  // ======================
+  async function handleUploadFile(file) {
+    if (!file) return;
+
+    const res = await postVoice(file, sessionId);
+
+    const userSaid = res?.inputText || "(unable to transcribe)";
+    pushMessage("user", userSaid);
+
+    handleBotResponse(res);
+  }
+
   async function handleSavePending() {
     const res = await savePending(sessionId);
     pushMessage("bot", res?.message || "Saved");
     setSaveVisible(false);
   }
 
-  // ======================
-  // FILE UPLOAD
-  // ======================
-  async function handleUploadFile(file) {
-    if (!file) return;
-
-    // Send to backend
-    const res = await postVoice(file, sessionId);
-
-    // Show what user SAID (transcription)
-    const userSaid = res?.inputText || "(unable to transcribe)";
-    pushMessage("user", userSaid);
-
-    // Show bot response
-    handleBotResponse(res);
-  }
-
-  // ======================
-  // RETURN UI
-  // ======================
+  // ------------------ MAIN CHAT UI ------------------
   return (
     <div className="min-h-screen flex items-center justify-center p-4 bg-gray-100">
       <div className="w-full max-w-md h-[85vh] bg-white rounded-xl shadow-lg flex flex-col">
+
         {/* HEADER */}
-        <div className="bg-blue-600 text-white p-4 rounded-t-xl font-semibold text-center">
+        <div className="bg-blue-600 text-white p-4 rounded-t-xl font-semibold text-center relative">
           Voice Bot Assistant
+
+          <button
+            className="absolute right-4 top-4 bg-red-500 text-white px-3 py-1 rounded"
+            onClick={() => {
+              localStorage.removeItem("token");
+              window.location.reload();
+            }}
+          >
+            Logout
+          </button>
         </div>
 
         {/* CHAT WINDOW */}
@@ -144,7 +185,6 @@ export default function App() {
 
         {/* INPUT AREA */}
         <div className="p-3 border-t flex gap-2 items-center bg-gray-50">
-          {/* TEXT INPUT */}
           <input
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -152,7 +192,6 @@ export default function App() {
             placeholder="Type a message..."
           />
 
-          {/* SEND BUTTON */}
           <button
             onClick={handleSendText}
             className="bg-blue-600 text-white px-4 py-2 rounded"
@@ -160,14 +199,12 @@ export default function App() {
             Send
           </button>
 
-          {/* RECORD BUTTON */}
           <RecorderButton
             recording={recording}
             onStart={startRecording}
             onStop={stopRecording}
           />
 
-          {/* UPLOAD BUTTON */}
           <label className="bg-purple-600 text-white px-3 py-2 rounded cursor-pointer ml-1">
             Upload
             <input

@@ -41,3 +41,11 @@ const interactionSchema = new mongoose.Schema({
 });
 
 export const InteractionLog = mongoose.model("InteractionLog", interactionSchema);
+
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  passwordHash: { type: String, required: true },
+  accountId: { type: String, required: true }  // <-- IMPORTANT
+});
+
+export const User = mongoose.model("User", userSchema);
