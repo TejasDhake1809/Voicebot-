@@ -55,3 +55,12 @@ export async function register(username, password, accountId) {
   });
   return res.json();
 }
+
+export async function registerFull(formData) {
+  const res = await fetch(`${API_BASE}/api/register-full`, {
+    method: "POST",
+    body: formData
+  });
+  return res.json();
+}
+
