@@ -1,25 +1,15 @@
 // nlu_gemini.js
 import axios from "axios";
 
-/*
-  Highly improved NLU:
-  - Strong FAQs detection
-  - Local heuristics override Gemini mistakes
-*/
-
 export async function detectIntent(text) {
-  const cleanedText = normalizeForIntent(text);
-
   const prompt = `
-You are an intent classifier.
+You are a strict banking NLU classifier. You must ALWAYS return JSON only.
 
-User message: "${cleanedText}"
+User message: "${text}"
 
-Return ONLY pure JSON. No markdown, no backticks, no explanation.
-
-JSON format:
+OUTPUT FORMAT (ONLY JSON):
 {
-  "intent": "",                  
+  "intent": "",
   "entities": {
     "accountId": null,
     "amount": null,
@@ -27,134 +17,125 @@ JSON format:
   }
 }
 
-INTENT RULES:
-- Balance → check_balance
-- Deposit/add/put money → deposit
-- Withdraw/take/remove money → withdraw
-- "who owns", "owner", "holder" → get_owner
-- "details for account", "account details" → account_details
-- ANY user question like:
-      "how to ...", 
-      "how do I ...", 
-      "what to do", 
-      "can you tell me", 
-      "i want to know",
-      "steps to ..."
-  → faq   (entities.question = entire user text)
-- "save", "store this question" → save_question
-- Default → smalltalk
+==================== RULES ====================
 
-RULE: If unsure, choose faq instead of smalltalk.
+INTENT RULES (very strict):
+
+1. **check_balance**
+   - Keywords: "balance", "how much money", "remaining money", "check my balance"
+
+2. **deposit**
+   - Keywords: "deposit", "add", "put money", "credit", "add amount"
+   - Extract amount if present.
+
+3. **withdraw**
+   - Keywords: "withdraw", "take out", "remove money", "debit"
+   - Extract amount if present.
+
+4. **get_owner**
+   - VERY IMPORTANT:
+   - Trigger when user asks who owns an account.
+   - Keywords:
+     - "owner"
+     - "who owns"
+     - "who is the owner"
+     - "account holder"
+     - "whose account"
+   - ALWAYS extract accountId when numbers appear.
+
+   EXAMPLES THAT MUST BE get_owner:
+   - "Who is the owner of account 101?"
+   - "Who owns account number 555?"
+   - "Tell me the account holder of 3001"
+
+5. **account_details**
+   - Keywords:
+     - "account details"
+     - "show details"
+     - "info for account"
+     - "details of account 123"
+
+6. **faq**
+   - General knowledge or HOW questions NOT related to accounts:
+     - "How to open an account?"
+     - "What are your working hours?"
+
+7. **save_question**
+   - If user says: "save this", "store this question", "yes save", "please save it"
+
+8. **greeting / goodbye**
+   - hello / hi / bye / goodnight etc.
+
+9. **smalltalk (fallback)**
+
+================================================
+
+ENTITY RULES:
+- accountId → extract ANY digits in the message.
+- amount → extract any number with or without currency.
+- question → if faq or save_question, put the original user text.
+
+REMEMBER:
+- STRICT JSON ONLY
+- Do not include commentary or markdown
 `;
 
   try {
     const res = await axios.post(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + process.env.GEMINI_API_KEY,
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
+        process.env.GEMINI_API_KEY,
       {
-        contents: [{ parts: [{ text: prompt }] }]
+        contents: [{ parts: [{ text: prompt }] }],
       },
       { timeout: 12000 }
     );
 
     let raw = res.data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
     raw = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
 
-    let parsed;
     try {
-      parsed = sanitize(JSON.parse(raw));
-    } catch {
+      return sanitize(JSON.parse(raw));
+    } catch (e) {
       const match = raw.match(/\{[\s\S]*\}/);
-      parsed = match ? sanitize(JSON.parse(match[0])) : { intent: "smalltalk", entities: {} };
+      if (match) return sanitize(JSON.parse(match[0]));
+      console.error("NLU RAW (unparseable):", raw);
+      return fallback();
     }
-
-    // ---------------------------------------------
-    // 🔥 SUPER-IMPORTANT: Override incorrect intent
-    // ---------------------------------------------
-    if (isFAQ(cleanedText)) {
-      parsed.intent = "faq";
-      parsed.entities.question = cleanedText;
-    }
-
-    // If Gemini "smalltalk" but looks like a question → faq
-    if (parsed.intent === "smalltalk" && looksLikeQuestion(cleanedText)) {
-      parsed.intent = "faq";
-      parsed.entities.question = cleanedText;
-    }
-
-    return parsed;
-
   } catch (err) {
-    console.error("Gemini RAW Error:", err.response?.data || err);
-
-    // On any error → treat questions as FAQ
-    if (looksLikeQuestion(cleanedText) || isFAQ(cleanedText)) {
-      return {
-        intent: "faq",
-        entities: { accountId: null, amount: null, question: cleanedText }
-      };
-    }
-
-    return { intent: "smalltalk", entities: { accountId: null, amount: null, question: null } };
+    console.error("Gemini RAW Error:", err.response?.data || err.message);
+    return fallback();
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/*                                Helper Logic                                */
-/* -------------------------------------------------------------------------- */
-
-// Normalize STT noisy input
-function normalizeForIntent(s) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/[^\w\s?]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-// Looks like FAQ based on patterns
-function isFAQ(text) {
-  return (
-    text.startsWith("how to") ||
-    text.startsWith("how do i") ||
-    text.includes("how can i") ||
-    text.includes("i want to") ||
-    text.includes("what to do") ||
-    text.includes("steps to") ||
-    text.includes("can you tell me") ||
-    text.includes("please explain") ||
-    text.includes("help me") ||
-    text.endsWith("?")
-  );
-}
-
-// Generic question detection
-function looksLikeQuestion(text) {
-  const qWords = ["what", "how", "why", "when", "where", "who", "which"];
-  const first = text.split(" ")[0];
-  return text.endsWith("?") || qWords.includes(first);
-}
-
-// Clean the JSON
 function sanitize(obj) {
   const out = {
     intent: typeof obj?.intent === "string" ? obj.intent : "smalltalk",
-    entities: { accountId: null, amount: null, question: null }
+    entities: { accountId: null, amount: null, question: null },
   };
 
   const e = obj?.entities || {};
-  if (e.accountId) {
+
+  if (e.accountId != null) {
     const digits = String(e.accountId).match(/\d+/g);
     if (digits) out.entities.accountId = digits.join("");
   }
 
-  if (e.amount) {
+  if (e.amount != null) {
     const num = Number(String(e.amount).replace(/[^0-9.-]+/g, ""));
     if (!Number.isNaN(num)) out.entities.amount = num;
   }
 
-  if (e.question) {
+  if (e.question != null) {
     out.entities.question = String(e.question).trim();
   }
 
   return out;
+}
+
+function fallback() {
+  return {
+    intent: "smalltalk",
+    entities: { accountId: null, amount: null, question: null },
+  };
 }
